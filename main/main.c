@@ -13,6 +13,8 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 
+#define BLINK_CONFIG_SPARKFUN 0
+
 #define BLINK_DEVICE_NAME "Blink"
 #define GATTS_SERVICE_UUID_BLINK 0x00FF
 #define GATTS_CHAR_UUID_BLINK 0xFF01
@@ -74,7 +76,7 @@ static esp_ble_adv_params_t blink_adv_params = {
     .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
 };
 
-static esp_ble_adv_data_t test_adv_data = {
+static esp_ble_adv_data_t blink_adv_data = {
     .set_scan_rsp = false,
     .include_name = true,
     .include_txpower = true,
@@ -93,8 +95,6 @@ static esp_ble_adv_data_t test_adv_data = {
 static void gatts_profile_blink_event_handler(esp_gatts_cb_event_t event,
 					      esp_gatt_if_t gatts_if,
 					      esp_ble_gatts_cb_param_t *param) {
-  uint16_t length = 0;
-  const uint8_t *prf_char;
   esp_gatt_rsp_t rsp;
   printf("gatts_event_handler: %d\n", event);
   switch (event) {
@@ -107,7 +107,7 @@ static void gatts_profile_blink_event_handler(esp_gatts_cb_event_t event,
     blink_profiles[0].service_id.id.uuid.uuid.uuid16 = GATTS_SERVICE_UUID_BLINK;
 
     esp_ble_gap_set_device_name(BLINK_DEVICE_NAME);
-    esp_ble_gap_config_adv_data(&test_adv_data);
+    esp_ble_gap_config_adv_data(&blink_adv_data);
     esp_ble_gatts_create_service(gatts_if, &blink_profiles[0].service_id,
 				 GATTS_NUM_HANDLE_BLINK);
     break;
@@ -206,10 +206,15 @@ static void gap_event_handler(esp_gap_ble_cb_event_t event,
 static void gatts_event_handler(esp_gatts_cb_event_t event,
 				esp_gatt_if_t gatts_if,
 				esp_ble_gatts_cb_param_t *param) {
+  if (event == ESP_GATTS_REG_EVT) {
+    if (param->reg.status == ESP_GATT_OK) {
+      blink_profiles[0].gatts_if = gatts_if;
+    }
+  }
   gatts_profile_blink_event_handler(event, gatts_if, param);
 }
 
-int ble_setup() {
+static int ble_setup() {
   int r;
 
   /* Initialize BLE */
@@ -237,6 +242,88 @@ int ble_setup() {
   return 0;
 }
 
+#if BLINK_CONFIG_SPARKFUN
+
+#define BLINK_GPIO_LED 5
+#define BLINK_GPIO_BTN 0
+
+static void blink_init_led() {
+  gpio_pad_select_gpio(BLINK_GPIO_LED);
+  gpio_set_direction(BLINK_GPIO_LED, GPIO_MODE_OUTPUT);
+}
+
+static void blink_set_led(int r, int g, int b) {
+  gpio_set_level(BLINK_GPIO_LED, (r != 0 || g != 0 || b != 0));
+}
+
+static void blink_init_btn() {
+  gpio_pad_select_gpio(BLINK_GPIO_BTN);
+  gpio_set_direction(BLINK_GPIO_BTN, GPIO_MODE_INPUT);
+}
+
+static int blink_get_btn() { return gpio_get_level(BLINK_GPIO_BTN); }
+
+#else
+/* Board with multicolor LED */
+#define BLINK_GPIO_LED_R 27
+#define BLINK_GPIO_LED_G 26
+#define BLINK_GPIO_LED_B 25
+
+#define BLINK_GPIO_BTN 14
+
+static void blink_init_led() {
+  gpio_pad_select_gpio(BLINK_GPIO_LED_R);
+  gpio_pad_select_gpio(BLINK_GPIO_LED_G);
+  gpio_pad_select_gpio(BLINK_GPIO_LED_B);
+  gpio_set_direction(BLINK_GPIO_LED_R, GPIO_MODE_OUTPUT);
+  gpio_set_direction(BLINK_GPIO_LED_G, GPIO_MODE_OUTPUT);
+  gpio_set_direction(BLINK_GPIO_LED_B, GPIO_MODE_OUTPUT);
+}
+
+static void blink_set_led(int r, int g, int b) {
+  gpio_set_level(BLINK_GPIO_LED_R, !!r);
+  gpio_set_level(BLINK_GPIO_LED_G, !!g);
+  gpio_set_level(BLINK_GPIO_LED_B, !!b);
+}
+
+static void blink_init_btn() {
+  gpio_pad_select_gpio(BLINK_GPIO_BTN);
+  gpio_set_direction(BLINK_GPIO_BTN, GPIO_MODE_INPUT);
+}
+
+static int blink_get_btn() { return gpio_get_level(BLINK_GPIO_BTN); }
+
+#endif
+
+static void led_task(void *arg) {
+  blink_init_led();
+  for (;;) {
+    blink_set_led(blink_attr[0], blink_attr[1], blink_attr[2]);
+    vTaskDelay(500 / portTICK_PERIOD_MS);
+    if (blink_attr[3] & 0xf0) {
+      blink_set_led(0, 0, 0);
+      vTaskDelay(500 / portTICK_PERIOD_MS);
+    }
+  }
+}
+
+static void btn_task(void *arg) {
+  blink_init_btn();
+  int prev_btn_state = blink_get_btn();
+  for (;;) {
+    int btn_state = blink_get_btn();
+    if (btn_state != prev_btn_state) {
+      prev_btn_state = btn_state;
+      blink_attr[3] &= 0xf0;
+      blink_attr[3] |= btn_state;
+      esp_ble_gatts_send_indicate(blink_profiles[0].gatts_if,
+				  blink_profiles[0].conn_id, 0,
+				  blink_profiles[0].char_handle, blink_attr, 0);
+    }
+    vTaskDelay(50 / portTICK_PERIOD_MS);
+  }
+}
+
 void app_main() {
   int r;
 
@@ -247,4 +334,7 @@ void app_main() {
     esp_restart();
     return;
   }
+
+  xTaskCreate(&led_task, "led_task", 2048, NULL, 5, NULL);
+  xTaskCreate(&btn_task, "btn_task", 2048, NULL, 5, NULL);
 }
