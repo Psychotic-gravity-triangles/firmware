@@ -13,7 +13,7 @@
 #include "esp_gap_ble_api.h"
 #include "esp_gatts_api.h"
 
-#define BLINK_CONFIG_SPARKFUN 0
+#define BLINK_CONFIG_SPARKFUN 1
 
 #define BLINK_DEVICE_NAME "Blink"
 #define GATTS_SERVICE_UUID_BLINK 0x00FF
@@ -300,7 +300,7 @@ static void led_task(void *arg) {
   for (;;) {
     blink_set_led(blink_attr[0], blink_attr[1], blink_attr[2]);
     vTaskDelay(500 / portTICK_PERIOD_MS);
-    if (blink_attr[3] & 0xf0) {
+    if (blink_attr[3]) {
       blink_set_led(0, 0, 0);
       vTaskDelay(500 / portTICK_PERIOD_MS);
     }
@@ -314,8 +314,8 @@ static void btn_task(void *arg) {
     int btn_state = blink_get_btn();
     if (btn_state != prev_btn_state) {
       prev_btn_state = btn_state;
-      blink_attr[3] &= 0xf0;
-      blink_attr[3] |= btn_state;
+      blink_attr[0] = blink_attr[1] = blink_attr[2] = blink_attr[3] = 0;
+      blink_attr[4] = btn_state;
       esp_ble_gatts_send_indicate(blink_profiles[0].gatts_if,
 				  blink_profiles[0].conn_id, 0,
 				  blink_profiles[0].char_handle, blink_attr, 0);
